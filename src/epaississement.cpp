@@ -1,9 +1,11 @@
 #include "epaississement.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <set>
 #include <stdexcept>
 
-#include "bords.hpp"
+namespace {
 
 void ajouterFace(Maillage& maillage, const std::vector<Sommet>& sommets, const std::string& quoi) {
     if (!maillage.add_face(sommets).is_valid()) {
@@ -11,133 +13,149 @@ void ajouterFace(Maillage& maillage, const std::vector<Sommet>& sommets, const s
     }
 }
 
-Maillage epaissir(const Maillage& source, float hauteur, const Point& direction) {
+Point normaleGlobale(const Maillage& source, const TableAretes& table) {
+    Point somme(0, 0, 0);
+    for (const std::vector<int>& coins : table.coins) {
+        if (coins.size() < 3) {
+            continue;
+        }
+        Point a = source.point(source.vertex_handle(coins[0]));
+        Point b = source.point(source.vertex_handle(coins[1]));
+        Point c = source.point(source.vertex_handle(coins[2]));
+        somme += OpenMesh::cross(b - a, c - a);
+    }
+    return somme;
+}
+
+Point deplacer(const Point& p, float hauteur, const Point& direction, float plancher) {
+    Point resultat = p + direction * hauteur;
+    if (std::isnan(plancher)) {
+        return resultat;
+    }
+    if (direction[2] < 0) {
+        resultat[2] = std::max(resultat[2], plancher);
+    } else if (direction[2] > 0) {
+        resultat[2] = std::min(resultat[2], plancher);
+    }
+    return resultat;
+}
+
+Sommet sommetOuCreer(Maillage& resultat, const Maillage& source, std::vector<Sommet>& copies, int s) {
+    if (!copies[s].is_valid()) {
+        copies[s] = resultat.add_vertex(source.point(source.vertex_handle(s)));
+    }
+    return copies[s];
+}
+
+}  // namespace
+
+Maillage epaissir(const Maillage& nappe, const TableAretes& table, float hauteur, const Point& direction,
+                  float plancher) {
     Maillage solide;
-    int nb = source.n_vertices();
-    std::vector<Sommet> dessus(nb);
-    std::vector<Sommet> dessous(nb);
+    bool copieAuDessus = OpenMesh::dot(normaleGlobale(nappe, table), direction) >= 0;
 
-    for (Sommet s : source.vertices()) {
-        Point pointHaut = source.point(s) + direction * hauteur;
-        dessus[s.idx()] = solide.add_vertex(pointHaut);
+    std::vector<Sommet> origine(table.nbSommets);
+    std::vector<Sommet> copie(table.nbSommets);
+    for (const std::vector<int>& coins : table.coins) {
+        for (int s : coins) {
+            if (origine[s].is_valid()) {
+                continue;
+            }
+            Point p = nappe.point(nappe.vertex_handle(s));
+            origine[s] = solide.add_vertex(p);
+            copie[s] = solide.add_vertex(deplacer(p, hauteur, direction, plancher));
+        }
     }
-    for (Sommet s : source.vertices()) {
-        dessous[s.idx()] = solide.add_vertex(source.point(s));
-    }
+    const std::vector<Sommet>& dessus = copieAuDessus ? copie : origine;
+    const std::vector<Sommet>& dessous = copieAuDessus ? origine : copie;
 
-    for (Face face : source.faces()) {
-        std::vector<int> sommets = sommetsDeLaFace(source, face.idx());
-
+    for (const std::vector<int>& coins : table.coins) {
         std::vector<Sommet> faceHaut;
         std::vector<Sommet> faceBas;
-        for (int i = 0; i < (int)sommets.size(); i++) {
-            faceHaut.push_back(dessus[sommets[i]]);
+        for (int s : coins) {
+            faceHaut.push_back(dessus[s]);
         }
-        for (int i = sommets.size() - 1; i >= 0; i--) {
-            faceBas.push_back(dessous[sommets[i]]);
+        for (int i = coins.size() - 1; i >= 0; i--) {
+            faceBas.push_back(dessous[coins[i]]);
         }
-
         ajouterFace(solide, faceHaut, "une face du dessus");
         ajouterFace(solide, faceBas, "une face du dessous");
     }
 
-    TableAretes aretes = construireAretes(source);
-    for (TableAretes::iterator it = aretes.begin(); it != aretes.end(); ++it) {
-        if (it->second.size() != 1) {
+    for (const Arete& arete : table.aretes) {
+        if (!arete.estBord()) {
             continue;
         }
-
-        int a = it->first.first;
-        int b = it->first.second;
-        if (!faceParcourt(sommetsDeLaFace(source, it->second[0]), a, b)) {
+        int a = arete.a;
+        int b = arete.b;
+        if (!faceParcourt(table.coins[arete.faces[0]], a, b)) {
             std::swap(a, b);
         }
-
-        std::vector<Sommet> cote;
-        cote.push_back(dessus[b]);
-        cote.push_back(dessus[a]);
-        cote.push_back(dessous[a]);
-        cote.push_back(dessous[b]);
-        ajouterFace(solide, cote, "un quad de bord");
+        std::vector<Sommet> paroi = {dessus[b], dessus[a], dessous[a], dessous[b]};
+        ajouterFace(solide, paroi, "un quad de bord");
     }
-
     return solide;
 }
 
-Maillage extruderFaces(const Maillage& maillage, const std::vector<int>& numerosFaces, float hauteur, const Point& direction) {
+Maillage extruderFaces(const Maillage& maillage, const TableAretes& table, const std::vector<int>& numerosFaces,
+                       float hauteur, const Point& direction) {
     std::set<int> selection(numerosFaces.begin(), numerosFaces.end());
-    int nb = maillage.n_vertices();
-
     Maillage resultat;
-    std::vector<Sommet> originaux(nb);
-    std::vector<Sommet> deplaces(nb);
+    std::vector<Sommet> originaux(table.nbSommets);
+    std::vector<Sommet> deplaces(table.nbSommets);
 
-    for (Face face : maillage.faces()) {
-        bool choisie = selection.count(face.idx()) > 0;
-
+    for (int f = 0; f < (int)table.coins.size(); f++) {
+        bool choisie = selection.count(f) > 0;
         std::vector<Sommet> sommets;
-        for (Sommet s : maillage.fv_range(face)) {
-            int i = s.idx();
+        for (int s : table.coins[f]) {
             if (choisie) {
-                if (!deplaces[i].is_valid()) {
-                    deplaces[i] = resultat.add_vertex(maillage.point(s) + direction * hauteur);
+                if (!deplaces[s].is_valid()) {
+                    deplaces[s] = resultat.add_vertex(maillage.point(maillage.vertex_handle(s)) + direction * hauteur);
                 }
-                sommets.push_back(deplaces[i]);
+                sommets.push_back(deplaces[s]);
             } else {
-                if (!originaux[i].is_valid()) {
-                    originaux[i] = resultat.add_vertex(maillage.point(s));
-                }
-                sommets.push_back(originaux[i]);
+                sommets.push_back(sommetOuCreer(resultat, maillage, originaux, s));
             }
         }
         ajouterFace(resultat, sommets, "une face");
     }
 
-    TableAretes aretes = construireAretes(maillage);
-    for (TableAretes::iterator it = aretes.begin(); it != aretes.end(); ++it) {
+    for (const Arete& arete : table.aretes) {
         int nbChoisies = 0;
         int faceChoisie = -1;
-        for (int k = 0; k < (int)it->second.size(); k++) {
-            if (selection.count(it->second[k]) > 0) {
+        for (int k = 0; k < arete.nbFaces && k < 2; k++) {
+            if (selection.count(arete.faces[k]) > 0) {
                 nbChoisies++;
-                faceChoisie = it->second[k];
+                faceChoisie = arete.faces[k];
             }
         }
         if (nbChoisies != 1) {
             continue;
         }
-
-        int a = it->first.first;
-        int b = it->first.second;
-        if (!faceParcourt(sommetsDeLaFace(maillage, faceChoisie), a, b)) {
+        int a = arete.a;
+        int b = arete.b;
+        if (!faceParcourt(table.coins[faceChoisie], a, b)) {
             std::swap(a, b);
         }
-        if (!originaux[a].is_valid()) {
-            originaux[a] = resultat.add_vertex(maillage.point(maillage.vertex_handle(a)));
-        }
-        if (!originaux[b].is_valid()) {
-            originaux[b] = resultat.add_vertex(maillage.point(maillage.vertex_handle(b)));
-        }
-
-        std::vector<Sommet> cote;
-        cote.push_back(deplaces[b]);
-        cote.push_back(deplaces[a]);
-        cote.push_back(originaux[a]);
-        cote.push_back(originaux[b]);
+        std::vector<Sommet> cote = {deplaces[b], deplaces[a],
+                                    sommetOuCreer(resultat, maillage, originaux, a),
+                                    sommetOuCreer(resultat, maillage, originaux, b)};
         ajouterFace(resultat, cote, "un quad de cote");
     }
-
     return resultat;
 }
 
 std::vector<int> facesDuDessus(const Maillage& maillage, const Point& haut) {
-    Maillage copie = maillage;
-    copie.request_face_normals();
-    copie.update_face_normals();
-
     std::vector<int> resultat;
-    for (Face face : copie.faces()) {
-        if (OpenMesh::dot(copie.normal(face), haut) > 0) {
+    for (Face face : maillage.faces()) {
+        std::vector<int> coins = sommetsDeLaFace(maillage, face.idx());
+        if (coins.size() < 3) {
+            continue;
+        }
+        Point a = maillage.point(maillage.vertex_handle(coins[0]));
+        Point b = maillage.point(maillage.vertex_handle(coins[1]));
+        Point c = maillage.point(maillage.vertex_handle(coins[2]));
+        if (OpenMesh::dot(OpenMesh::cross(b - a, c - a), haut) > 0) {
             resultat.push_back(face.idx());
         }
     }

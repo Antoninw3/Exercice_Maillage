@@ -1,13 +1,19 @@
 #pragma once
 
+#include <limits>
 #include <string>
 #include <vector>
 
+#include "aretes.hpp"
 #include "maillage.hpp"
 
-Maillage epaissir(const Maillage& surface, float hauteur, const Point& direction);
+const float SANS_PLANCHER = std::numeric_limits<float>::quiet_NaN();
 
-Maillage extruderFaces(const Maillage& maillage, const std::vector<int>& numerosFaces, float hauteur, const Point& direction);
+Maillage epaissir(const Maillage& nappe, const TableAretes& table, float hauteur, const Point& direction,
+                  float plancher);
+
+Maillage extruderFaces(const Maillage& maillage, const TableAretes& table, const std::vector<int>& numerosFaces,
+                       float hauteur, const Point& direction);
 
 std::vector<int> facesDuDessus(const Maillage& maillage, const Point& haut);
 

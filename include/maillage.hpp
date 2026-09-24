@@ -7,3 +7,5 @@ typedef OpenMesh::PolyMesh_ArrayKernelT<> Maillage;
 typedef Maillage::VertexHandle Sommet;
 typedef Maillage::FaceHandle Face;
 typedef Maillage::Point Point;
+
+const Point HAUT(0, 0, 1);

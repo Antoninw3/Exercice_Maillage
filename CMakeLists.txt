@@ -9,13 +9,17 @@ endif()
 
 find_package(OpenMesh REQUIRED)
 
-add_executable(objread
-  src/main.cpp
+add_library(maillage STATIC
+  src/aretes.cpp
   src/bords.cpp
   src/epaississement.cpp
   src/decoupeur.cpp
   src/reparateur.cpp
 )
-target_include_directories(objread PRIVATE include)
-target_link_libraries(objread PRIVATE OpenMeshCore OpenMeshTools)
+target_include_directories(maillage PUBLIC include)
+target_link_libraries(maillage PUBLIC OpenMeshCore OpenMeshTools)
+target_compile_options(maillage PRIVATE -Wall -Wextra)
+
+add_executable(objread src/main.cpp)
+target_link_libraries(objread PRIVATE maillage)
 target_compile_options(objread PRIVATE -Wall -Wextra)
