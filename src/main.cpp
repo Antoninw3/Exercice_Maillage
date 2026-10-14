@@ -1,11 +1,11 @@
 #include <cstdlib>
 #include <cmath>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "allegement.hpp"
 #include "aretes.hpp"
 #include "bords.hpp"
 #include "decoupeur.hpp"
@@ -18,11 +18,17 @@ struct Options {
     std::string fichier;
     std::string commande;
     std::string sortie;
+    std::string autreSortie;
     float hauteur = 0;
     bool toutesLesFaces = false;
     int face = -1;
-    float plancher = SANS_PLANCHER;
+    bool cotes = false;
+    bool plein = false;
+    float socle = SANS_SOCLE;
+    float marge = 2;
     int seuilPoussieres = 0;
+    int seuilTrous = 0;
+    float largeurBille = 0;
 };
 
 void afficherUsage(const std::string& programme) {
@@ -30,13 +36,28 @@ void afficherUsage(const std::string& programme) {
               << std::endl
               << "Sans commande : analyse le maillage (points, faces, aretes, bords)" << std::endl
               << std::endl
-              << "extruder <sortie.obj|sortie.stl> <hauteur> [face|all [plancher]]" << std::endl
+              << "extruder <sortie.obj|sortie.stl> <hauteur> [face|all [cotes|plein [socle]]]" << std::endl
               << "  hauteur seule : liste des faces du dessus, puis choix au clavier" << std::endl
               << "  face          : cette face monte, reliee a ses voisines" << std::endl
-              << "  all           : surface ouverte -> coquille fermee de <hauteur> d'epaisseur vers le bas ;" << std::endl
+              << "  all           : surface ouverte -> coquille fermee de <hauteur> d'epaisseur vers le bas" << std::endl
+              << "                  (copie verticale de la nappe) ;" << std::endl
               << "                  solide ferme -> tout le dessus monte" << std::endl
-              << "  all <plancher>: comme all, mais le dessous ne descend pas sous z = plancher (plat a ces endroits)" << std::endl
+              << "  all cotes     : comme all, plus une patte de <hauteur> d'epaisseur sous chaque bord, cote matiere," << std::endl
+              << "                  qui descend jusqu'a un plan situe marge sous le point le plus bas de la coque" << std::endl
+              << "  all cotes <z> : memes pattes, mais jusqu'au plan z = <z> donne" << std::endl
+              << "  all plein     : solide plein a fond plat, <hauteur> sous le point le plus bas du dessus ;" << std::endl
+              << "                  les rainures restent ouvertes de haut en bas" << std::endl
+              << "  all plein <z> : meme solide, fond au plan z = <z> donne" << std::endl
+              << "  option marge=<mm> (n'importe ou) : descente des pattes sous la coque, 2 mm par defaut" << std::endl
               << "  option poussieres=<N> (n'importe ou) : avant d'epaissir, supprime les morceaux de moins de N faces" << std::endl
+              << "  option trous=<N> (n'importe ou) : avant d'epaissir, bouche les trous d'au plus N aretes de tour" << std::endl
+              << "  option bille=<largeur> (n'importe ou, avec all seul) : le dessous suit une bille de <hauteur>" << std::endl
+              << "                  de haut et de <largeur> de rayon a plat ; mur d'au moins min(hauteur, largeur)" << std::endl
+              << "                  partout, bille ronde si largeur = hauteur" << std::endl
+              << std::endl
+              << "alleger <sortie.obj|sortie.stl> [autre_sortie.obj|autre_sortie.stl]" << std::endl
+              << "  fusionne les triangles sans changer la surface (paliers plats, fond, murs droits)" << std::endl
+              << "  deux sorties : le meme resultat ecrit dans les deux fichiers (ex. OBJ et STL)" << std::endl
               << std::endl
               << "decouper <prefixe>" << std::endl
               << "  coupe le maillage en 4 quarts puis les rebouche, et ecrit :" << std::endl
@@ -54,6 +75,15 @@ Options lireOptions(int argcBrut, char** argvBrut) {
         std::string mot = argvBrut[i];
         if (mot.rfind("poussieres=", 0) == 0) {
             options.seuilPoussieres = std::stoi(mot.substr(11));
+        } else if (mot.rfind("trous=", 0) == 0) {
+            options.seuilTrous = std::stoi(mot.substr(6));
+        } else if (mot.rfind("marge=", 0) == 0) {
+            options.marge = std::stof(mot.substr(6));
+        } else if (mot.rfind("bille=", 0) == 0) {
+            options.largeurBille = std::stof(mot.substr(6));
+            if (!(options.largeurBille > 0)) {
+                throw std::invalid_argument("bille : la largeur doit etre positive");
+            }
         } else {
             argv.push_back(argvBrut[i]);
         }
@@ -70,7 +100,7 @@ Options lireOptions(int argcBrut, char** argvBrut) {
     options.commande = argv[2];
 
     if (options.commande == "extruder") {
-        if (argc < 5 || argc > 7) {
+        if (argc < 5 || argc > 8) {
             throw std::invalid_argument("extruder : arguments incorrects");
         }
         options.sortie = argv[3];
@@ -79,15 +109,35 @@ Options lireOptions(int argcBrut, char** argvBrut) {
             std::string choix = argv[5];
             if (choix == "all") {
                 options.toutesLesFaces = true;
-                if (argc == 7) {
-                    options.plancher = std::stof(argv[6]);
+                std::string suite = argc >= 7 ? argv[6] : "";
+                if (argc >= 7 && suite != "cotes" && suite != "plein") {
+                    throw std::invalid_argument("extruder : apres all, seuls 'cotes' et 'plein' sont acceptes");
+                }
+                options.cotes = suite == "cotes";
+                options.plein = suite == "plein";
+                if (argc == 8) {
+                    if (!options.cotes && !options.plein) {
+                        throw std::invalid_argument("extruder : le socle n'a de sens qu'avec cotes ou plein");
+                    }
+                    options.socle = std::stof(argv[7]);
                 }
             } else {
-                if (argc == 7) {
-                    throw std::invalid_argument("extruder : le plancher n'a de sens qu'avec all");
+                if (argc >= 7) {
+                    throw std::invalid_argument("extruder : cotes et plein n'ont de sens qu'avec all");
                 }
                 options.face = std::stoi(choix);
             }
+        }
+        if (options.largeurBille > 0 && (!options.toutesLesFaces || options.cotes || options.plein)) {
+            throw std::invalid_argument("extruder : bille n'a de sens qu'avec all seul");
+        }
+    } else if (options.commande == "alleger") {
+        if (argc != 4 && argc != 5) {
+            throw std::invalid_argument("alleger : arguments incorrects");
+        }
+        options.sortie = argv[3];
+        if (argc == 5) {
+            options.autreSortie = argv[4];
         }
     } else if (options.commande == "decouper") {
         if (argc != 4) {
@@ -182,7 +232,32 @@ Maillage epaissirNappe(const Maillage& nappe, const TableAretes& table, const Op
         int apres = compterMorceaux(tableCourante);
         std::cout << avant - apres << " poussiere(s) supprimee(s), " << apres << " morceau(x) conserve(s)" << std::endl;
     }
-    return epaissir(courant, tableCourante, options.hauteur, -HAUT, options.plancher);
+    if (options.seuilTrous > 0) {
+        int nbBouches = 0;
+        courant = boucherPetitsTrous(courant, tableCourante, options.seuilTrous, nbBouches);
+        tableCourante = construireAretes(courant);
+        std::cout << nbBouches << " petit(s) trou(s) bouche(s) (au plus " << options.seuilTrous << " aretes de tour)"
+                  << std::endl;
+    }
+    if (options.plein) {
+        float socle = options.socle;
+        if (std::isnan(socle)) {
+            socle = zMinimum(courant, tableCourante) - options.hauteur;
+        }
+        std::cout << "Plein jusqu'a z = " << socle << " (epaisseur minimale "
+                  << zMinimum(courant, tableCourante) - socle << ")" << std::endl;
+        return remplirJusquAuSol(courant, tableCourante, socle);
+    }
+    if (!options.cotes) {
+        return epaissir(courant, tableCourante, options.hauteur, options.largeurBille, -HAUT);
+    }
+    float socle = options.socle;
+    if (std::isnan(socle)) {
+        socle = zMinimum(courant, tableCourante) - options.hauteur - options.marge;
+    }
+    std::cout << "Cotes jusqu'a z = " << socle << " (dessous de la coque a z = "
+              << zMinimum(courant, tableCourante) - options.hauteur << " au plus bas)" << std::endl;
+    return epaissirAvecPattes(courant, tableCourante, options.hauteur, socle);
 }
 
 int commandeExtruder(const Maillage& maillage, const TableAretes& table, const Options& options) {
@@ -195,12 +270,7 @@ int commandeExtruder(const Maillage& maillage, const TableAretes& table, const O
         titre = "Dessus extrude (" + std::to_string(dessus.size()) + " faces)";
     } else if (options.toutesLesFaces) {
         resultat = epaissirNappe(maillage, table, options);
-        titre = "Solide";
-        if (!std::isnan(options.plancher)) {
-            std::ostringstream flux;
-            flux << "Solide (dessous plat sous z = " << options.plancher << ")";
-            titre = flux.str();
-        }
+        titre = options.plein ? "Solide plein" : options.cotes ? "Solide avec cotes" : "Solide";
     } else {
         int face = choisirFaceDuDessus(facesDuDessus(maillage, HAUT), options.face);
         resultat = extruderFaces(maillage, table, {face}, options.hauteur, HAUT);
@@ -255,6 +325,20 @@ int commandeDecouper(const Maillage& maillage, const Options& options) {
     return 0;
 }
 
+int commandeAlleger(const Maillage& maillage, const Options& options) {
+    int nbFusions = 0;
+    Maillage leger = alleger(maillage, nbFusions);
+    std::cout << nbFusions << " fusion(s) d'aretes sans perte" << std::endl;
+    afficherSolide(leger, "Allege");
+    if (!ecrireFichier(leger, options.sortie)) {
+        return 3;
+    }
+    if (!options.autreSortie.empty() && !ecrireFichier(leger, options.autreSortie)) {
+        return 3;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     Options options;
     try {
@@ -283,6 +367,10 @@ int main(int argc, char** argv) {
     try {
         if (options.commande == "extruder") {
             return commandeExtruder(maillage, table, options);
+        }
+        table = TableAretes();
+        if (options.commande == "alleger") {
+            return commandeAlleger(maillage, options);
         }
         return commandeDecouper(maillage, options);
     } catch (const std::exception& e) {

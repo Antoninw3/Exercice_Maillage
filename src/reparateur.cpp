@@ -1,8 +1,13 @@
 #include "reparateur.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
+#include <string>
 
 #include "bords.hpp"
+#include "triangulation.hpp"
 
 namespace {
 
@@ -101,16 +106,58 @@ Maillage separerPincements(const Maillage& maillage, const TableAretes& table) {
         return maillage;
     }
 
-    Maillage resultat;
     std::vector<int> premiere(table.nbSommets, -1);
+    int nbCopies = 0;
+    for (int s = 0; s < table.nbSommets; s++) {
+        if (ev.parSommet[s] > 0) {
+            premiere[s] = nbCopies;
+            nbCopies += ev.parSommet[s];
+        }
+    }
+    std::vector<Point> centre(nbCopies, Point(0, 0, 0));
+    std::vector<int> nbFacesEventail(nbCopies, 0);
+    std::vector<float> hauteurMin(nbCopies, std::numeric_limits<float>::infinity());
+    for (int f = 0; f < (int)table.coins.size(); f++) {
+        Point milieu(0, 0, 0);
+        for (int s : table.coins[f]) {
+            milieu += maillage.point(maillage.vertex_handle(s));
+        }
+        milieu /= table.coins[f].size();
+        for (int k = 0; k < (int)table.coins[f].size(); k++) {
+            int s = table.coins[f][k];
+            if (ev.parSommet[s] > 1) {
+                int c = premiere[s] + ev.numero[f][k];
+                centre[c] += milieu;
+                nbFacesEventail[c]++;
+                int n = table.coins[f].size();
+                Point p = maillage.point(maillage.vertex_handle(s));
+                Point a = maillage.point(maillage.vertex_handle(table.coins[f][(k + 1) % n]));
+                Point b = maillage.point(maillage.vertex_handle(table.coins[f][(k + n - 1) % n]));
+                float cote = (b - a).norm();
+                if (cote > 0) {
+                    hauteurMin[c] = std::min(hauteurMin[c], OpenMesh::cross(p - a, b - a).norm() / cote);
+                }
+            }
+        }
+    }
+
+    const float RECUL_PINCEMENT = 0.1f;
+    Maillage resultat;
     std::vector<Sommet> copies;
     for (int s = 0; s < table.nbSommets; s++) {
-        if (ev.parSommet[s] == 0) {
-            continue;
-        }
-        premiere[s] = copies.size();
+        Point p = maillage.point(maillage.vertex_handle(s));
         for (int k = 0; k < ev.parSommet[s]; k++) {
-            copies.push_back(resultat.add_vertex(maillage.point(maillage.vertex_handle(s))));
+            int c = premiere[s] + k;
+            Point position = p;
+            if (ev.parSommet[s] > 1 && nbFacesEventail[c] > 0) {
+                Point recul = (centre[c] / nbFacesEventail[c] - p) * RECUL_PINCEMENT;
+                float borne = 0.5f * hauteurMin[c];
+                if (recul.norm() > borne) {
+                    recul *= borne / recul.norm();
+                }
+                position = p + recul;
+            }
+            copies.push_back(resultat.add_vertex(position));
         }
     }
 
@@ -187,6 +234,82 @@ Maillage supprimerPoussieres(const Maillage& maillage, const TableAretes& table,
     return resultat;
 }
 
+namespace {
+
+Point2D projeter(const Point& p, const Point& normale) {
+    int dominant = 0;
+    for (int k = 1; k < 3; k++) {
+        if (std::fabs(normale[k]) > std::fabs(normale[dominant])) {
+            dominant = k;
+        }
+    }
+    int u = (dominant + 1) % 3;
+    int v = (dominant + 2) % 3;
+    return {p[u], p[v]};
+}
+
+std::string decrire(const Maillage& maillage, Sommet s) {
+    Point p = maillage.point(s);
+    return "(" + std::to_string(p[0]) + ", " + std::to_string(p[1]) + ", " + std::to_string(p[2]) + ")";
+}
+
+void boucher(Maillage& maillage, const std::vector<int>& chaine, const Point& normalePlan) {
+    std::vector<Point2D> polygone;
+    for (int s : chaine) {
+        polygone.push_back(projeter(maillage.point(maillage.vertex_handle(s)), normalePlan));
+    }
+    std::vector<int> triangles = trianguler(polygone);
+    for (size_t k = 0; k + 2 < triangles.size(); k += 3) {
+        Sommet a = maillage.vertex_handle(chaine[triangles[k]]);
+        Sommet b = maillage.vertex_handle(chaine[triangles[k + 1]]);
+        Sommet c = maillage.vertex_handle(chaine[triangles[k + 2]]);
+        if (a == b || b == c || c == a) {
+            continue;
+        }
+        if (!maillage.add_face({a, b, c}).is_valid()) {
+            throw std::runtime_error("reparation : impossible d'ajouter un triangle de bouchon " + decrire(maillage, a)
+                                     + " " + decrire(maillage, b) + " " + decrire(maillage, c) + " dans une chaine de "
+                                     + std::to_string(chaine.size()) + " sommets");
+        }
+    }
+}
+
+}  // namespace
+
+Maillage boucherPetitsTrous(const Maillage& nappe, const TableAretes& table, int maxAretes, int& nbBouches) {
+    int nbMorceaux = 0;
+    std::vector<int> morceau = morceauDeChaqueFace(table, nbMorceaux);
+    std::vector<double> sens(nbMorceaux, 0);
+    std::vector<int> morceauDuSommet(table.nbSommets, -1);
+    for (int f = 0; f < (int)table.coins.size(); f++) {
+        std::vector<Point2D> face;
+        for (int s : table.coins[f]) {
+            face.push_back(projeter(nappe.point(nappe.vertex_handle(s)), HAUT));
+            morceauDuSommet[s] = morceau[f];
+        }
+        sens[morceau[f]] += aireSignee(face);
+    }
+
+    Maillage resultat = nappe;
+    nbBouches = 0;
+    FiltreArete tout = [](const Arete&) { return true; };
+    for (const std::vector<int>& chaine : chainesDeBord(table, tout)) {
+        if (chaine.size() < 3 || (int)chaine.size() > maxAretes) {
+            continue;
+        }
+        std::vector<Point2D> polygone;
+        for (int s : chaine) {
+            polygone.push_back(projeter(nappe.point(nappe.vertex_handle(s)), HAUT));
+        }
+        if (aireSignee(polygone) * sens[morceauDuSommet[chaine[0]]] <= 0) {
+            continue;
+        }
+        boucher(resultat, chaine, HAUT);
+        nbBouches++;
+    }
+    return resultat;
+}
+
 Maillage reboucher(const Maillage& morceau, const std::vector<Plan>& plans) {
     Maillage resultat = morceau;
     for (const Plan& plan : plans) {
@@ -201,13 +324,7 @@ Maillage reboucher(const Maillage& morceau, const std::vector<Plan>& plans) {
             if (chaine.size() < 3) {
                 continue;
             }
-            std::vector<Sommet> sommets;
-            for (int s : chaine) {
-                sommets.push_back(resultat.vertex_handle(s));
-            }
-            if (!resultat.add_face(sommets).is_valid()) {
-                throw std::runtime_error("reparation : impossible d'ajouter un bouchon");
-            }
+            boucher(resultat, chaine, plan.normale);
         }
     }
     return resultat;

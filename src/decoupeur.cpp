@@ -21,8 +21,28 @@ std::vector<Plan> plansMedians(const Maillage& maillage) {
     float tolerance = std::max((maximum - minimum).norm() * 1e-5f, 1e-7f);
 
     std::vector<Plan> plans;
-    plans.push_back({centre, Point(1, 0, 0), tolerance});
-    plans.push_back({centre, Point(0, 1, 0), tolerance});
+    for (int axe = 0; axe < 2; axe++) {
+        Point normale(axe == 0 ? 1 : 0, axe == 1 ? 1 : 0, 0);
+        std::vector<float> valeurs;
+        valeurs.reserve(maillage.n_vertices());
+        for (Sommet s : maillage.vertices()) {
+            valeurs.push_back(maillage.point(s)[axe]);
+        }
+        std::sort(valeurs.begin(), valeurs.end());
+        std::vector<float>::iterator apres = std::upper_bound(valeurs.begin(), valeurs.end(), centre[axe]);
+        float dessus = apres == valeurs.end() ? centre[axe] : *apres;
+        float dessous = centre[axe];
+        for (std::vector<float>::iterator it = apres; it != valeurs.begin();) {
+            --it;
+            if (*it < dessus - 3 * tolerance) {
+                dessous = *it;
+                break;
+            }
+        }
+        Point origine = centre;
+        origine[axe] = (dessous + dessus) / 2;
+        plans.push_back({origine, normale, tolerance});
+    }
     return plans;
 }
 
@@ -77,13 +97,11 @@ Maillage couper(const Maillage& maillage, const Plan& plan, bool garderDevant) {
 }
 
 std::vector<Maillage> quatreQuarts(const Maillage& maillage, const std::vector<Plan>& plans) {
-    Maillage devant = couper(maillage, plans[0], true);
-    Maillage derriere = couper(maillage, plans[0], false);
-
     std::vector<Maillage> quarts;
-    quarts.push_back(couper(devant, plans[1], true));
-    quarts.push_back(couper(devant, plans[1], false));
-    quarts.push_back(couper(derriere, plans[1], true));
-    quarts.push_back(couper(derriere, plans[1], false));
+    for (bool garderDevant : {true, false}) {
+        Maillage moitie = couper(maillage, plans[0], garderDevant);
+        quarts.push_back(couper(moitie, plans[1], true));
+        quarts.push_back(couper(moitie, plans[1], false));
+    }
     return quarts;
 }
